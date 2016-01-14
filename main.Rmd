@@ -1,0 +1,137 @@
+---
+title: "Predicting tree cover using landsate data"
+author: "Mark  ten Vregelaar and Jos Goris"
+date: "January 13, 2016"
+output: html_document
+---
+
+
+## Set up the working environment
+```{r, message=FALSE}
+# Start with empty environment
+rm(list=ls())
+
+# Get required libraries
+library(raster)
+library(rgdal)
+library(rasterVis)
+
+# create data and output folder
+ifolder <- "./data/"
+ofolder <- "./output/"
+dir.create(ifolder, showWarnings = FALSE)
+dir.create(ofolder, showWarnings = FALSE)
+
+```
+
+## Downloading the required data and pre-processing
+```{r,message=FALSE}
+# Download and unzip landsate data-----------------------------------------------------------
+
+dataURL <- "https://github.com/GeoScripting-WUR/AdvancedRasterAnalysis/archive/gh-pages.zip"
+inputZip <- list.files(path=ifolder, pattern= '^.*\\.zip$')
+if (length(inputZip) == 0){ ##only download when not alrady downloaded
+	download.file(url = dataURL, destfile = 'data/landsate_data.zip', method = 'wget')
+	
+}
+unzip('data/landsate_data.zip', exdir=ifolder)  # unzip NDVI data
+
+# Load the data------------------------------------------------------------------------------
+load("data/AdvancedRasterAnalysis-gh-pages/data/GewataB2.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/GewataB3.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/GewataB4.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/trainingPoly.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/GewataB1.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/GewataB5.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/GewataB7.rda")
+load("data/AdvancedRasterAnalysis-gh-pages/data/vcfGewata.rda")
+
+# Pre-processing------------------------------------------------------------------------------
+# Assign NA to pixels with value >10
+vcfGewata[vcfGewata>100]<- NA
+
+# Organize the data into different variables 
+vcf_B123 <- brick(vcfGewata,GewataB1,GewataB2,GewataB3)
+vcf_B456 <- brick(vcfGewata,GewataB4,GewataB5,GewataB7)
+allbands <- brick(vcfGewata,GewataB1,GewataB2,GewataB3,GewataB4,GewataB5,GewataB7)
+VCF <- allbands[[1]]
+
+bandnames <- c("VCF", "band1", "band2", "band3","band4", "band5", "band7")
+names(allbands) <- bandnames
+names(vcf_B123) <- bandnames[1:4]
+names(vcf_B456) <- c(bandnames[1],bandnames[5:7])
+
+# Make dataframe of allbands and omit NA
+valuetable <- getValues(allbands)
+valuetable <- na.omit(valuetable)
+valuetable <- as.data.frame(valuetable)
+
+
+```
+
+## Create model for calculating VCF
+
+Examining the correlations of the spectral bands with VCF
+```{r,message=FALSE}
+
+# Plot scatter plot of different spectral bands and VCF
+pairs(vcf_B123)
+pairs(vcf_B456)
+```
+
+Band 4 has very low correlation and is therefore not used in the model
+```{r,message=FALSE}
+# Calculate linear regression model for predicting VCF 
+regmodel <- lm(VCF ~ band1 + band2 + band3 + band5 +band7, data=valuetable)
+```
+
+Summary of the model
+```{r,message=FALSE}
+# show model summary 
+summary(regmodel)
+```
+
+Predict VCF using the linear model
+```{r,message=FALSE}
+# Use model to predict VCF values
+predVCF <- predict(allbands, model=regmodel, na.rm=TRUE)
+
+# Change values below 0 in predVCF to NA
+predVCF[predVCF<0] <- NA
+```
+
+
+
+Evaluation of results by calculating difference and RMSE
+```{r, message=FALSE}
+# Calculate the differnce between predicted VCF and original VCF
+difference <- (predVCF - VCF)
+# Calculate RMSE
+RMSE <- sqrt((cellStats((difference)^2,stat='mean', na.rm=TRUE)))
+names(RMSE) <- 'RMSE total raster'
+# Calculate RMSE for different zones
+trainingPoly@data$Code <- as.numeric(trainingPoly@data$Class)
+zones <- rasterize(trainingPoly, difference, field='Code')
+diffmasked <- mask(difference, zones)
+zoneRMSE <- sqrt(zonal(((diffmasked)^2), zones, fun='mean', digits=0, na.rm=TRUE))
+rownames(zoneRMSE)<-c('cropland','forest','wetlands')
+zoneRMSE<-zoneRMSE[,-1]
+
+```
+
+## Plot results
+Predicted and priginal VCF
+```{r,message=FALSE}
+myColorkey <- list(at=seq(0, 100, 2.5), # where the colors change
+                   labels=list(labels=seq(0, 100, 10),at=seq(0, 100, 10)# labels
+                     ),space = "bottom")
+levelplot(stack(VCF,predVCF), col.regions = colorRampPalette(c("brown",'yellow', "darkgreen"))(255),colorkey =myColorkey,names.attr=c('Original VCF','predicted VCF'),main=list('Tree cover in Gewata (Ethiopia)',cex=1.8,vjust=-1),scales=list(draw=FALSE),xlab=list('Tree cover (%)',vjust=7))
+
+```
+
+RMSE error
+
+```{r, message=FALSE}
+barplot(c(zoneRMSE,RMSE),main='RMSE per zone and total raster',ylab='RMSE',col=c("orange", "dark green", "light blue","blue"),ylim= c(0,12))
+```
+
